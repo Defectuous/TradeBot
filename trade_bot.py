@@ -41,6 +41,13 @@ ALPACA_BASE_URL = os.environ.get("ALPACA_BASE_URL", "https://paper-api.alpaca.ma
 
 # Bot settings
 SYMBOL = os.environ.get("SYMBOL", "AAPL")
+# Optional comma-separated list of symbols (overrides SYMBOL when set)
+SYMBOLS_ENV = os.environ.get("SYMBOLS")
+if SYMBOLS_ENV:
+    SYMBOLS = [s.strip().upper() for s in SYMBOLS_ENV.split(",") if s.strip()]
+else:
+    SYMBOLS = [SYMBOL]
+
 QTY = int(os.environ.get("QTY", "1"))
 DRY_RUN = os.environ.get("DRY_RUN", "true").lower() in ("1", "true", "yes")
 OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-3.5-turbo-instruct")
@@ -141,40 +148,40 @@ def get_last_trade_price(api, symbol: str) -> Decimal:
     return Decimal(str(bars[-1].c))
 
 
-def run_once(api):
+def run_once(api, symbol: str):
     try:
-        rsi = fetch_rsi(SYMBOL)
-        logger.info("RSI for %s = %s", SYMBOL, rsi)
+        rsi = fetch_rsi(symbol)
+        logger.info("RSI for %s = %s", symbol, rsi)
     except Exception as e:
-        logger.exception("Failed to fetch RSI: %s", e)
+        logger.exception("Failed to fetch RSI for %s: %s", symbol, e)
         return
 
     try:
         decision = ask_gpt_for_decision(rsi)
-        logger.info("GPT decision: %s", decision)
+        logger.info("GPT decision for %s: %s", symbol, decision)
     except Exception as e:
-        logger.exception("GPT error: %s", e)
+        logger.exception("GPT error for %s: %s", symbol, e)
         return
 
     if decision == "BUY":
         try:
-            price = get_last_trade_price(api, SYMBOL)
+            price = get_last_trade_price(api, symbol)
             if not can_buy(api, price, QTY):
-                logger.info("Insufficient buying power to buy %d %s at %s", QTY, SYMBOL, price)
+                logger.info("Insufficient buying power to buy %d %s at %s", QTY, symbol, price)
                 return
-            place_order(api, SYMBOL, QTY, "buy")
+            place_order(api, symbol, QTY, "buy")
         except Exception as e:
-            logger.exception("Error handling BUY: %s", e)
+            logger.exception("Error handling BUY for %s: %s", symbol, e)
     elif decision == "SELL":
         try:
-            if not owns_at_least(api, SYMBOL, QTY):
-                logger.info("Do not own %d %s to sell", QTY, SYMBOL)
+            if not owns_at_least(api, symbol, QTY):
+                logger.info("Do not own %d %s to sell", QTY, symbol)
                 return
-            place_order(api, SYMBOL, QTY, "sell")
+            place_order(api, symbol, QTY, "sell")
         except Exception as e:
-            logger.exception("Error handling SELL: %s", e)
+            logger.exception("Error handling SELL for %s: %s", symbol, e)
     else:
-        logger.info("Decision NOTHING — no action taken")
+        logger.info("Decision NOTHING for %s — no action taken", symbol)
 
 
 def main():
@@ -192,7 +199,9 @@ def main():
             time.sleep(max(60, int(secs)))
             continue
 
-        run_once(api)
+        # Iterate over configured symbols for this minute
+        for sym in SYMBOLS:
+            run_once(api, sym)
 
         # Sleep until the next full minute
         now_local = datetime.now()
