@@ -113,9 +113,131 @@ EAST = pytz.timezone("US/Eastern")
 
 def in_market_hours(now=None):
     now = now or datetime.now(EAST)
-    start = datetime.combine(now.date(), dtime(hour=9, minute=30), tzinfo=EAST)
-    end = datetime.combine(now.date(), dtime(hour=16, minute=0), tzinfo=EAST)
+    # Build aware datetimes in US/Eastern correctly using localize
+    start_naive = datetime.combine(now.date(), dtime(hour=9, minute=30))
+    end_naive = datetime.combine(now.date(), dtime(hour=16, minute=0))
+    start = EAST.localize(start_naive)
+    end = EAST.localize(end_naive)
     return start <= now <= end
+
+
+def _nth_weekday(year: int, month: int, weekday: int, n: int) -> datetime.date:
+    # weekday: Monday=0 .. Sunday=6
+    d = datetime(year, month, 1).date()
+    first_weekday = d.weekday()
+    delta_days = (weekday - first_weekday) % 7
+    day = 1 + delta_days + (n - 1) * 7
+    return datetime(year, month, day).date()
+
+
+def _last_weekday(year: int, month: int, weekday: int) -> datetime.date:
+    # find last weekday in month
+    from calendar import monthrange
+    last_day = monthrange(year, month)[1]
+    d = datetime(year, month, last_day).date()
+    delta = (d.weekday() - weekday) % 7
+    return d - timedelta(days=delta)
+
+
+def _easter_date(year: int) -> datetime.date:
+    # Anonymous Gregorian algorithm
+    a = year % 19
+    b = year // 100
+    c = year % 100
+    d = b // 4
+    e = b % 4
+    f = (b + 8) // 25
+    g = (b - f + 1) // 3
+    h = (19 * a + b - d - g + 15) % 30
+    i = c // 4
+    k = c % 4
+    l = (32 + 2 * e + 2 * i - h - k) % 7
+    m = (a + 11 * h + 22 * l) // 451
+    month = (h + l - 7 * m + 114) // 31
+    day = ((h + l - 7 * m + 114) % 31) + 1
+    return datetime(year, month, day).date()
+
+
+def is_market_holiday(d: datetime.date) -> bool:
+    year = d.year
+    holidays = set()
+
+    # New Year's Day (observed)
+    ny = datetime(year, 1, 1).date()
+    if ny.weekday() == 5:  # Saturday -> observed Friday
+        holidays.add(ny - timedelta(days=1))
+    elif ny.weekday() == 6:  # Sunday -> observed Monday
+        holidays.add(ny + timedelta(days=1))
+    else:
+        holidays.add(ny)
+
+    # Martin Luther King Jr. Day: third Monday in January
+    holidays.add(_nth_weekday(year, 1, 0, 3))
+
+    # Presidents' Day (Washington): third Monday in February
+    holidays.add(_nth_weekday(year, 2, 0, 3))
+
+    # Good Friday: Friday before Easter
+    eas = _easter_date(year)
+    holidays.add(eas - timedelta(days=2))
+
+    # Memorial Day: last Monday in May
+    holidays.add(_last_weekday(year, 5, 0))
+
+    # Juneteenth: June 19 (observed)
+    j = datetime(year, 6, 19).date()
+    if j.weekday() == 5:
+        holidays.add(j - timedelta(days=1))
+    elif j.weekday() == 6:
+        holidays.add(j + timedelta(days=1))
+    else:
+        holidays.add(j)
+
+    # Independence Day: July 4 (observed)
+    ind = datetime(year, 7, 4).date()
+    if ind.weekday() == 5:
+        holidays.add(ind - timedelta(days=1))
+    elif ind.weekday() == 6:
+        holidays.add(ind + timedelta(days=1))
+    else:
+        holidays.add(ind)
+
+    # Labor Day: first Monday in September
+    holidays.add(_nth_weekday(year, 9, 0, 1))
+
+    # Thanksgiving: fourth Thursday in November
+    holidays.add(_nth_weekday(year, 11, 3, 4))
+
+    # Christmas Day: Dec 25 (observed)
+    x = datetime(year, 12, 25).date()
+    if x.weekday() == 5:
+        holidays.add(x - timedelta(days=1))
+    elif x.weekday() == 6:
+        holidays.add(x + timedelta(days=1))
+    else:
+        holidays.add(x)
+
+    return d in holidays
+
+
+def next_trading_day_start(now: datetime) -> datetime:
+    # now is tz-aware in EAST
+    cur_date = now.date()
+    candidate = cur_date
+    # start searching from today if before open, else next day
+    start_naive = datetime.combine(candidate, dtime(hour=9, minute=30))
+    start_dt = EAST.localize(start_naive)
+    if now >= start_dt:
+        candidate = candidate + timedelta(days=1)
+
+    # find next day that is Mon-Fri and not a market holiday
+    while True:
+        if candidate.weekday() >= 5 or is_market_holiday(candidate):
+            candidate = candidate + timedelta(days=1)
+            continue
+        # found trading day
+        next_open_naive = datetime.combine(candidate, dtime(hour=9, minute=30))
+        return EAST.localize(next_open_naive)
 
 
 def fetch_rsi(symbol: str) -> Decimal:
@@ -378,7 +500,8 @@ def main():
             logger.info("Outside market hours (%s). Sleeping till market open.", now.isoformat())
             # Sleep until next market open (tomorrow 9:30 ET)
             tomorrow = now.date() + timedelta(days=1)
-            next_open = datetime.combine(tomorrow, dtime(hour=9, minute=30), tzinfo=EAST)
+            next_open_naive = datetime.combine(tomorrow, dtime(hour=9, minute=30))
+            next_open = EAST.localize(next_open_naive)
             secs = (next_open - now).total_seconds()
             time.sleep(max(60, int(secs)))
             continue
