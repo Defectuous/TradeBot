@@ -115,7 +115,11 @@ def in_market_hours(now=None):
     now = now or datetime.now(EAST)
     # Build aware datetimes in US/Eastern correctly using localize
     start_naive = datetime.combine(now.date(), dtime(hour=9, minute=30))
-    end_naive = datetime.combine(now.date(), dtime(hour=16, minute=0))
+    # Use early close at 13:00 on certain days
+    if is_early_close(now.date()):
+        end_naive = datetime.combine(now.date(), dtime(hour=13, minute=0))
+    else:
+        end_naive = datetime.combine(now.date(), dtime(hour=16, minute=0))
     start = EAST.localize(start_naive)
     end = EAST.localize(end_naive)
     return start <= now <= end
@@ -238,6 +242,26 @@ def next_trading_day_start(now: datetime) -> datetime:
         # found trading day
         next_open_naive = datetime.combine(candidate, dtime(hour=9, minute=30))
         return EAST.localize(next_open_naive)
+
+
+def is_early_close(d: datetime.date) -> bool:
+    # Early close at 13:00 ET on:
+    # - The day before Independence Day (if July 4 is a weekday)
+    # - The day after Thanksgiving (Friday)
+    # - Christmas Eve (Dec 24)
+    year = d.year
+    # Day before Independence Day
+    ind = datetime(year, 7, 4).date()
+    day_before_ind = ind - timedelta(days=1)
+
+    # Day after Thanksgiving: Thanksgiving is fourth Thursday in November
+    thanks = _nth_weekday(year, 11, 3, 4)
+    day_after_thanks = thanks + timedelta(days=1)
+
+    # Christmas Eve
+    xmas_eve = datetime(year, 12, 24).date()
+
+    return d in (day_before_ind, day_after_thanks, xmas_eve)
 
 
 def fetch_rsi(symbol: str) -> Decimal:
