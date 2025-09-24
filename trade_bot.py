@@ -32,6 +32,8 @@ LOG_LEVEL = os.environ.get("LOG_LEVEL", "INFO")
 logging.basicConfig(level=LOG_LEVEL, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
 
+import threading
+
 # Optional file logging (toggle via .env: LOG_TO_FILE=true)
 LOG_TO_FILE = os.environ.get("LOG_TO_FILE", "false").lower() in ("1", "true", "yes")
 if LOG_TO_FILE:
@@ -39,13 +41,50 @@ if LOG_TO_FILE:
         base_dir = os.path.dirname(os.path.abspath(__file__))
         logs_dir = os.path.join(base_dir, "Logs")
         os.makedirs(logs_dir, exist_ok=True)
-        ts = datetime.now().strftime("%m%d%Y.%H%M")
-        log_filename = os.path.join(logs_dir, f"TradeBot.{ts}.log")
-        fh = logging.FileHandler(log_filename)
-        fh.setLevel(LOG_LEVEL)
-        fh.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
-        logger.addHandler(fh)
-        logger.info("File logging enabled: %s", log_filename)
+
+        tz = pytz.timezone("US/Eastern")
+
+        def make_handler():
+            ts = datetime.now(tz).strftime("%m%d%Y.%H%M")
+            log_filename = os.path.join(logs_dir, f"TradeBot.{ts}.log")
+            fh = logging.FileHandler(log_filename)
+            fh.setLevel(LOG_LEVEL)
+            fh.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
+            return fh
+
+        # current file handler stored in a mutable container for rotation
+        file_handler = [make_handler()]
+        logger.addHandler(file_handler[0])
+        logger.info("File logging enabled: %s", file_handler[0].baseFilename)
+
+        def rotator():
+            while True:
+                try:
+                    # compute seconds until next top of hour in Eastern time
+                    now_e = datetime.now(tz)
+                    next_hour = (now_e + timedelta(hours=1)).replace(minute=0, second=0, microsecond=0)
+                    sleep_secs = (next_hour - now_e).total_seconds()
+                    # sleep until just after the hour boundary
+                    time.sleep(max(1, sleep_secs + 1))
+
+                    new_h = make_handler()
+                    logger.addHandler(new_h)
+                    # remove and close old handler
+                    old = file_handler[0]
+                    logger.removeHandler(old)
+                    try:
+                        old.close()
+                    except Exception:
+                        pass
+                    file_handler[0] = new_h
+                    logger.info("Rotated log file, new file: %s", file_handler[0].baseFilename)
+                except Exception:
+                    logger.exception("Log rotation failed")
+                    # on failure, wait a minute before retrying
+                    time.sleep(60)
+
+        t = threading.Thread(target=rotator, daemon=True)
+        t.start()
     except Exception:
         logger.exception("Failed to enable file logging")
 
