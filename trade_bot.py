@@ -158,17 +158,44 @@ def ask_gpt_for_decision(rsi_value: Decimal) -> str:
             temperature=0,
         )
     except Exception:
-        logger.exception("GPT API call failed")
-        raise
+        # If the model is not a chat model, the server returns a 404 with a helpful message.
+        err = None
+        try:
+            raise
+        except Exception as e:
+            err = e
+        msg = str(err)
+        # detect the specific error about non-chat model and fallback to completions endpoint
+        if "not a chat model" in msg or "v1/chat/completions" in msg:
+            try:
+                resp2 = client.completions.create(
+                    model=OPENAI_MODEL,
+                    prompt=prompt,
+                    max_tokens=10,
+                    temperature=0,
+                )
+                # parse legacy completions response
+                try:
+                    text = resp2.choices[0].text.strip()
+                except Exception:
+                    text = str(resp2).strip()
+            except Exception:
+                logger.exception("Fallback completions API call failed")
+                raise
+        else:
+            logger.exception("GPT API call failed")
+            raise
 
     # Parse response using expected v1 response attributes
-    try:
-        text = resp.choices[0].message.content.strip()
-    except Exception:
+    # If text not set by a prior fallback branch, parse chat response
+    if 'text' not in locals() or not locals().get('text'):
         try:
-            text = resp["choices"][0]["message"]["content"].strip()
+            text = resp.choices[0].message.content.strip()
         except Exception:
-            text = str(resp).strip()
+            try:
+                text = resp["choices"][0]["message"]["content"].strip()
+            except Exception:
+                text = str(resp).strip()
     # Normalize to first token
     token = text.split()[0].upper()
     if token not in ("BUY", "SELL", "NOTHING"):
@@ -212,13 +239,65 @@ def place_order(api, symbol: str, qty: int, side: str):
 
 
 def get_last_trade_price(api, symbol: str) -> Decimal:
-    barset = api.get_barset(symbol, "1Min", limit=1)
-    bars = barset.get(symbol)
-    if not bars:
-        # fallback to last trade
-        t = api.get_last_trade(symbol)
-        return Decimal(str(t.price))
-    return Decimal(str(bars[-1].c))
+    # Try old alpaca-trade-api method first
+    try:
+        if hasattr(api, "get_barset"):
+            barset = api.get_barset(symbol, "1Min", limit=1)
+            bars = barset.get(symbol)
+            if bars:
+                return Decimal(str(bars[-1].c))
+    except Exception:
+        # continue to fallbacks
+        pass
+
+    # Common fallback: latest trade endpoint
+    for fn in ("get_last_trade", "get_latest_trade", "get_last_trades", "get_latest_trades"):
+        if hasattr(api, fn):
+            try:
+                t = getattr(api, fn)(symbol)
+                # t may be an object with attribute price, or have .price, or be a mapping
+                price = None
+                if hasattr(t, "price"):
+                    price = getattr(t, "price")
+                elif isinstance(t, dict) and "price" in t:
+                    price = t["price"]
+                else:
+                    # try common attribute names
+                    for attr in ("p", "price_raw"):
+                        if hasattr(t, attr):
+                            price = getattr(t, attr)
+                            break
+                if price is None:
+                    # as a last resort, stringify
+                    return Decimal(str(t))
+                return Decimal(str(price))
+            except Exception:
+                continue
+
+    # Another fallback: data API that may provide bars
+    if hasattr(api, "get_bars"):
+        try:
+            bars = api.get_bars(symbol, "1Min", limit=1)
+            # bars may be a dict or sequence
+            try:
+                last = bars[symbol][-1]
+                return Decimal(str(last.c))
+            except Exception:
+                try:
+                    # bars may be a sequence
+                    last = list(bars)[-1]
+                    # try attrs
+                    if hasattr(last, "c"):
+                        return Decimal(str(last.c))
+                    if hasattr(last, "close"):
+                        return Decimal(str(last.close))
+                    return Decimal(str(last))
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+    raise RuntimeError("Unable to get last trade price for %s with available Alpaca client" % symbol)
 
 
 def run_once(api, symbol: str):
