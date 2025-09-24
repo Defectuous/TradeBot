@@ -1,0 +1,9 @@
+#1 Sort out a method to buy/sell partial shares
+#2 Buy share amount based on wallet's whole/liquid value
+#3 Include strategies that include other indicators beyond RSI for stock trading
+#4 Split the amount of held shares vrs the total amount of wallet value
+#5 Include Discord & or Telegram support for tracking BUY/SELL actions & final metrics for End of Day
+  - Including starting value of each stock [ Hourly ]
+  - Wallet Growth/Loss at end of day
+  - Starting and Ending notification of the Bot
+  
