@@ -209,7 +209,15 @@ def connect_alpaca():
         raise RuntimeError("Alpaca credentials not set")
     if tradeapi is None:
         raise RuntimeError("alpaca_trade_api package not installed")
-    api = tradeapi.REST(ALPACA_API_KEY, ALPACA_SECRET_KEY, base_url=ALPACA_BASE_URL)
+    # Sanitize the base URL to avoid inline comments or trailing spaces
+    base_url_raw = os.environ.get("ALPACA_BASE_URL", ALPACA_BASE_URL) or ALPACA_BASE_URL
+    # If someone added an inline comment like "https://paper-api.alpaca.markets // For Paper Trading",
+    # dotenv will include the comment. Split on whitespace and take the first token.
+    base_url = base_url_raw.split()[0].strip()
+    # Remove any trailing slashes
+    base_url = base_url.rstrip('/')
+    logger.info("Connecting to Alpaca base URL: %s", base_url)
+    api = tradeapi.REST(ALPACA_API_KEY, ALPACA_SECRET_KEY, base_url=base_url)
     return api
 
 
@@ -228,11 +236,11 @@ def owns_at_least(api, symbol: str, qty: int) -> bool:
         return False
 
 
-def place_order(api, symbol: str, qty: int, side: str):
+def place_order(api, symbol: str, qty, side: str):
     if DRY_RUN:
-        logger.info("DRY RUN: would %s %d %s", side, qty, symbol)
+        logger.info("DRY RUN: would %s %s %s", side, qty, symbol)
         return None
-    logger.info("Submitting %s order: %s %d", side, symbol, qty)
+    logger.info("Submitting %s order: %s %s", side, symbol, qty)
     order = api.submit_order(symbol=symbol, qty=qty, side=side.lower(), type="market", time_in_force="day")
     logger.info("Order submitted: id=%s status=%s", getattr(order, "id", None), getattr(order, "status", None))
     return order
@@ -326,10 +334,34 @@ def run_once(api, symbol: str):
             logger.exception("Error handling BUY for %s: %s", symbol, e)
     elif decision == "SELL":
         try:
-            if not owns_at_least(api, symbol, QTY):
-                logger.info("Do not own %d %s to sell", QTY, symbol)
+            # Sell entire position for this symbol
+            try:
+                pos = api.get_position(symbol)
+            except Exception:
+                logger.info("Do not own any %s to sell", symbol)
                 return
-            place_order(api, symbol, QTY, "sell")
+
+            try:
+                qty_owned = Decimal(str(pos.qty))
+            except Exception:
+                # fallback if pos.qty isn't present
+                try:
+                    qty_owned = Decimal(str(getattr(pos, "qty", 0)))
+                except Exception:
+                    logger.info("Could not determine position quantity for %s", symbol)
+                    return
+
+            if qty_owned <= 0:
+                logger.info("Do not own any %s to sell", symbol)
+                return
+
+            # Prepare qty for order: use integer shares when whole number, otherwise use float for fractional
+            if qty_owned == qty_owned.to_integral_value():
+                qty_for_order = int(qty_owned)
+            else:
+                qty_for_order = float(qty_owned)
+
+            place_order(api, symbol, qty_for_order, "sell")
         except Exception as e:
             logger.exception("Error handling SELL for %s: %s", symbol, e)
     else:
