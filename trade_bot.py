@@ -137,74 +137,38 @@ def ask_gpt_for_decision(rsi_value: Decimal) -> str:
         raise RuntimeError("OPENAI_API_KEY not set")
     if openai is None:
         raise RuntimeError("openai package not installed")
-    openai.api_key = OPENAI_API_KEY
+
+    # Require the new OpenAI client available in openai>=1.0.0
+    Client = getattr(openai, "OpenAI", None)
+    if Client is None:
+        raise RuntimeError("openai package does not expose OpenAI client; please install openai>=1.0.0")
+
     prompt = (
         f"You are an expert stock trader and you are tasked with looking at the Relative Strength "
         f"Index (RSI) of a stock and from this information decide to BUY, SELL, or do NOTHING. "
         f"The stock RSI value is {rsi_value}. Please reply with exactly one of: BUY, SELL, NOTHING."
     )
-    # Support both pre-1.0 and openai>=1.0 interfaces
-    text = None
-    errors = []
 
-    # 1) Try new OpenAI v1+ client API first
+    client = Client(api_key=OPENAI_API_KEY)
     try:
-        Client = getattr(openai, "OpenAI", None)
-        if Client:
-            client = Client(api_key=OPENAI_API_KEY)
-        else:
-            client = openai
+        resp = client.chat.completions.create(
+            model=OPENAI_MODEL,
+            messages=[{"role": "user", "content": prompt}],
+            max_tokens=10,
+            temperature=0,
+        )
+    except Exception:
+        logger.exception("GPT API call failed")
+        raise
 
-        # Prefer explicit chat.completions.create path when available
-        if hasattr(client, "chat") and hasattr(client.chat, "completions") and hasattr(client.chat.completions, "create"):
-            resp = client.chat.completions.create(
-                model=OPENAI_MODEL,
-                messages=[{"role": "user", "content": prompt}],
-                max_tokens=10,
-                temperature=0,
-            )
-        else:
-            # Try module-level chat path (some builds expose openai.chat)
-            resp = openai.chat.completions.create(
-                model=OPENAI_MODEL,
-                messages=[{"role": "user", "content": prompt}],
-                max_tokens=10,
-                temperature=0,
-            )
-
-        # Parse response (try a few shapes)
+    # Parse response using expected v1 response attributes
+    try:
+        text = resp.choices[0].message.content.strip()
+    except Exception:
         try:
             text = resp["choices"][0]["message"]["content"].strip()
         except Exception:
-            try:
-                text = resp.choices[0].message.content.strip()
-            except Exception:
-                text = str(resp).strip()
-    except Exception as e_new:
-        errors.append(e_new)
-        logger.debug("New OpenAI API attempt failed: %s", e_new)
-
-        # 2) Fallback: try old ChatCompletion interface (for older openai versions)
-        try:
-            resp = openai.ChatCompletion.create(
-                model=OPENAI_MODEL,
-                messages=[{"role": "user", "content": prompt}],
-                max_tokens=10,
-                temperature=0,
-            )
-            text = resp["choices"][0]["message"]["content"].strip()
-        except Exception as e_old:
-            errors.append(e_old)
-
-    if not text:
-        # Log both errors for diagnostics and raise a single exception
-        for err in errors:
-            logger.debug("GPT error detail: %s", err)
-        logger.exception("GPT API call failed (new and old interfaces)")
-        # Raise the last error to preserve traceback
-        if errors:
-            raise errors[-1]
-        raise RuntimeError("GPT API call failed with unknown error")
+            text = str(resp).strip()
     # Normalize to first token
     token = text.split()[0].upper()
     if token not in ("BUY", "SELL", "NOTHING"):
