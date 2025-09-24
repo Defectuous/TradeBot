@@ -32,6 +32,23 @@ LOG_LEVEL = os.environ.get("LOG_LEVEL", "INFO")
 logging.basicConfig(level=LOG_LEVEL, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
 
+# Optional file logging (toggle via .env: LOG_TO_FILE=true)
+LOG_TO_FILE = os.environ.get("LOG_TO_FILE", "false").lower() in ("1", "true", "yes")
+if LOG_TO_FILE:
+    try:
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+        logs_dir = os.path.join(base_dir, "Logs")
+        os.makedirs(logs_dir, exist_ok=True)
+        ts = datetime.now().strftime("%m%d%Y.%H%M")
+        log_filename = os.path.join(logs_dir, f"TradeBot.{ts}.log")
+        fh = logging.FileHandler(log_filename)
+        fh.setLevel(LOG_LEVEL)
+        fh.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
+        logger.addHandler(fh)
+        logger.info("File logging enabled: %s", log_filename)
+    except Exception:
+        logger.exception("Failed to enable file logging")
+
 # Required env vars
 TAAPI_KEY = os.environ.get("TAAPI_KEY")
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
