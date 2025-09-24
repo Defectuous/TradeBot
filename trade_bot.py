@@ -143,15 +143,45 @@ def ask_gpt_for_decision(rsi_value: Decimal) -> str:
         f"Index (RSI) of a stock and from this information decide to BUY, SELL, or do NOTHING. "
         f"The stock RSI value is {rsi_value}. Please reply with exactly one of: BUY, SELL, NOTHING."
     )
-
-    # Use ChatCompletion with model that the user specified.
-    resp = openai.ChatCompletion.create(
-        model=OPENAI_MODEL,
-        messages=[{"role": "user", "content": prompt}],
-        max_tokens=10,
-        temperature=0,
-    )
-    text = resp["choices"][0]["message"]["content"].strip()
+    # Support both pre-1.0 and openai>=1.0 interfaces
+    text = None
+    try:
+        # Old interface (openai.ChatCompletion)
+        if getattr(openai, "ChatCompletion", None):
+            resp = openai.ChatCompletion.create(
+                model=OPENAI_MODEL,
+                messages=[{"role": "user", "content": prompt}],
+                max_tokens=10,
+                temperature=0,
+            )
+            # resp is typically a dict
+            text = resp["choices"][0]["message"]["content"].strip()
+        else:
+            # New interface: OpenAI client with chat.completions.create
+            Client = getattr(openai, "OpenAI", None)
+            if Client:
+                client = Client(api_key=OPENAI_API_KEY)
+            else:
+                # fallback: some versions allow using module as client
+                client = openai
+            resp = client.chat.completions.create(
+                model=OPENAI_MODEL,
+                messages=[{"role": "user", "content": prompt}],
+                max_tokens=10,
+                temperature=0,
+            )
+            # Try multiple access patterns
+            try:
+                text = resp["choices"][0]["message"]["content"].strip()
+            except Exception:
+                try:
+                    text = resp.choices[0].message.content.strip()
+                except Exception:
+                    # Last-resort string conversion
+                    text = str(resp).strip()
+    except Exception:
+        logger.exception("GPT API call failed")
+        raise
     # Normalize to first token
     token = text.split()[0].upper()
     if token not in ("BUY", "SELL", "NOTHING"):
