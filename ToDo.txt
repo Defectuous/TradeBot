@@ -6,4 +6,8 @@
   - Including starting value of each stock [ Hourly ]
   - Wallet Growth/Loss at end of day
   - Starting and Ending notification of the Bot
-  
+#6 Split it into modules for each function
+  - Taapi
+  - OpenAI
+  - Alpaca
+  - MarketTime ( the dates and times to run the bot )
