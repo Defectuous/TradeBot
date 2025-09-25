@@ -609,7 +609,7 @@ def run_once(api, symbol: str):
 
 
 def main():
-    logger.info("Starting trade_bot for (DRY_RUN=%s)", SYMBOL, DRY_RUN)
+    logger.info("Starting RSI->GPT->Alpaca bot for %s (DRY_RUN=%s)", SYMBOL, DRY_RUN)
     api = connect_alpaca()
 
     while True:
