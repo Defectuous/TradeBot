@@ -628,12 +628,7 @@ def run_once(api, symbol: str):
         logger.exception("Failed to fetch RSI for %s: %s", symbol, e)
         return
 
-    try:
-        decision = ask_gpt_for_decision(rsi)
-        logger.info("GPT decision for %s: %s", symbol, decision)
-    except Exception as e:
-        logger.exception("GPT error for %s: %s", symbol, e)
-        return
+    # (Old single-arg GPT call removed. We now build full context below and call GPT with extended args.)
 
     # Gather additional context required by the new GPT prompt
     try:
