@@ -2,7 +2,7 @@
 """
 Simple RSI->GPT->Alpaca trading bot.
 
-Run in paper mode first. Uses TAAPI, OpenAI (gpt-3.5-turbo-instruct), and Alpaca Python SDK.
+Run in paper mode first. Uses TAAPI, OpenAI (gpt-3.5-turbo), and Alpaca Python SDK.
 
 Configure via environment variables or a .env file. See README.md and .env.example.
 """
@@ -106,7 +106,7 @@ else:
 
 QTY = int(os.environ.get("QTY", "1"))
 DRY_RUN = os.environ.get("DRY_RUN", "true").lower() in ("1", "true", "yes")
-OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-3.5-turbo-instruct")
+OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-3.5-turbo")
 
 EAST = pytz.timezone("US/Eastern")
 
@@ -367,6 +367,79 @@ def connect_alpaca():
     return api
 
 
+def get_wallet_amount(api, field: str = "cash") -> Decimal:
+    """
+    Return a Decimal representing the requested wallet/account field from Alpaca.
+
+    field: one of 'cash', 'buying_power', 'portfolio_value', 'equity'.
+    Raises RuntimeError if the account or field cannot be read.
+    """
+    if api is None:
+        raise RuntimeError("Alpaca API client is not provided")
+
+    try:
+        account = api.get_account()
+    except Exception as e:
+        logger.exception("Failed to fetch Alpaca account: %s", e)
+        raise RuntimeError("Failed to fetch Alpaca account") from e
+
+    # Normalize requested field and try a few common attribute names
+    normalized = field.strip().lower()
+    candidates = [normalized, normalized.replace('-', '_')]
+    # common alternate names
+    alt_map = {
+        "cash": ["cash", "cash_balance"],
+        "buying_power": ["buying_power", "buyingpower"],
+        "portfolio_value": ["portfolio_value", "portfoliovalue", "equity"],
+        "equity": ["equity", "portfolio_value"],
+    }
+    if normalized in alt_map:
+        candidates = alt_map[normalized] + candidates
+
+    val = None
+    # Try attribute access first
+    for c in candidates:
+        if hasattr(account, c):
+            try:
+                val = getattr(account, c)
+                break
+            except Exception:
+                continue
+
+    # If not found as attribute, try mapping/dict access
+    if val is None:
+        try:
+            # account could be a mapping-like object
+            if isinstance(account, dict):
+                for c in candidates:
+                    if c in account:
+                        val = account[c]
+                        break
+        except Exception:
+            pass
+
+    if val is None:
+        # Last resort: try common attribute names directly
+        for c in ("cash", "buying_power", "portfolio_value", "equity"):
+            if hasattr(account, c):
+                try:
+                    val = getattr(account, c)
+                    break
+                except Exception:
+                    continue
+
+    if val is None:
+        logger.error("Unable to find requested account field '%s' on Alpaca account object", field)
+        raise RuntimeError(f"Account field '{field}' not found on Alpaca account")
+
+    # Return Decimal converted value; account fields are typically strings
+    try:
+        return Decimal(str(val))
+    except Exception as e:
+        logger.exception("Failed to convert account field '%s' value to Decimal: %s", field, e)
+        raise RuntimeError(f"Invalid numeric value for account field '{field}'") from e
+
+
 def can_buy(api, price: Decimal, qty: int) -> bool:
     account = api.get_account()
     buying_power = Decimal(account.buying_power)
@@ -471,6 +544,17 @@ def run_once(api, symbol: str):
 
     if decision == "BUY":
         try:
+            # Log wallet amounts before attempting to buy
+            try:
+                cash_before = get_wallet_amount(api, "cash")
+            except Exception:
+                cash_before = None
+            try:
+                bp_before = get_wallet_amount(api, "buying_power")
+            except Exception:
+                bp_before = None
+            logger.info("Wallet before BUY for %s: cash=%s buying_power=%s", symbol, str(cash_before) if cash_before is not None else "<unknown>", str(bp_before) if bp_before is not None else "<unknown>")
+
             price = get_last_trade_price(api, symbol)
             if not can_buy(api, price, QTY):
                 logger.info("Insufficient buying power to buy %d %s at %s", QTY, symbol, price)
@@ -508,6 +592,16 @@ def run_once(api, symbol: str):
                 qty_for_order = float(qty_owned)
 
             place_order(api, symbol, qty_for_order, "sell")
+            # Log wallet amounts after SELL
+            try:
+                cash_after = get_wallet_amount(api, "cash")
+            except Exception:
+                cash_after = None
+            try:
+                pv_after = get_wallet_amount(api, "portfolio_value")
+            except Exception:
+                pv_after = None
+            logger.info("Wallet after SELL for %s: cash=%s portfolio_value=%s", symbol, str(cash_after) if cash_after is not None else "<unknown>", str(pv_after) if pv_after is not None else "<unknown>")
         except Exception as e:
             logger.exception("Error handling SELL for %s: %s", symbol, e)
     else:
