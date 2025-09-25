@@ -278,7 +278,12 @@ def fetch_rsi(symbol: str) -> Decimal:
     return Decimal(str(data["value"]))
 
 
-def ask_gpt_for_decision(rsi_value: Decimal) -> str:
+def ask_gpt_for_decision(rsi_value: Decimal, symbol: str, shares_owned: Decimal, stock_price: Decimal, wallet: Decimal):
+    """
+    Ask GPT for a decision given extended context. Returns a tuple (action, amount)
+    where action is one of 'BUY', 'SELL', 'NOTHING' and amount is a Decimal (or None)
+    representing shares to buy/sell when applicable.
+    """
     if not OPENAI_API_KEY:
         raise RuntimeError("OPENAI_API_KEY not set")
     if openai is None:
@@ -289,10 +294,14 @@ def ask_gpt_for_decision(rsi_value: Decimal) -> str:
     if Client is None:
         raise RuntimeError("openai package does not expose OpenAI client; please install openai>=1.0.0")
 
+    # Build the prompt using the user's requested template (cleaned for clarity)
     prompt = (
-        f"You are an expert stock trader and you are tasked with looking at the Relative Strength "
-        f"Index (RSI) of a stock and from this information decide to BUY, SELL, or do NOTHING. "
-        f"The stock RSI value is {rsi_value}. Please reply with exactly one of: BUY, SELL, NOTHING."
+        "You are an expert stock trader specializing in day trading and you have been tasked with reviewing the following information of a stock: "
+        f"Relative Strength Index (RSI)={rsi_value}, the current price of the stock [Stock_Price]={stock_price}, how many shares of this stock you currently own [Shares_Owned_Of_Stock]={shares_owned}, "
+        f"and how much money is available [Wallet]={wallet}. The overbought threshold is 70 and the oversold threshold is 30. "
+        "Your goal is to maximize profit while adhering to strict risk management. Your risk tolerance is a maximum of 2% of your wallet per trade. "
+        "If a trade is executed, a stop-loss should be set at a price that limits potential loss to this amount. "
+        "Please reply with exactly one of the following: BUY [Amount], SELL [Amount], NOTHING."
     )
 
     client = Client(api_key=OPENAI_API_KEY)
@@ -300,27 +309,25 @@ def ask_gpt_for_decision(rsi_value: Decimal) -> str:
         resp = client.chat.completions.create(
             model=OPENAI_MODEL,
             messages=[{"role": "user", "content": prompt}],
-            max_tokens=10,
+            max_tokens=20,
             temperature=0,
         )
     except Exception:
-        # If the model is not a chat model, the server returns a 404 with a helpful message.
+        # If the model is not a chat model, try legacy completions endpoint
         err = None
         try:
             raise
         except Exception as e:
             err = e
         msg = str(err)
-        # detect the specific error about non-chat model and fallback to completions endpoint
         if "not a chat model" in msg or "v1/chat/completions" in msg:
             try:
                 resp2 = client.completions.create(
                     model=OPENAI_MODEL,
                     prompt=prompt,
-                    max_tokens=10,
+                    max_tokens=20,
                     temperature=0,
                 )
-                # parse legacy completions response
                 try:
                     text = resp2.choices[0].text.strip()
                 except Exception:
@@ -332,8 +339,7 @@ def ask_gpt_for_decision(rsi_value: Decimal) -> str:
             logger.exception("GPT API call failed")
             raise
 
-    # Parse response using expected v1 response attributes
-    # If text not set by a prior fallback branch, parse chat response
+    # Parse response text
     if 'text' not in locals() or not locals().get('text'):
         try:
             text = resp.choices[0].message.content.strip()
@@ -342,12 +348,37 @@ def ask_gpt_for_decision(rsi_value: Decimal) -> str:
                 text = resp["choices"][0]["message"]["content"].strip()
             except Exception:
                 text = str(resp).strip()
-    # Normalize to first token
-    token = text.split()[0].upper()
-    if token not in ("BUY", "SELL", "NOTHING"):
-        logger.warning("GPT returned unexpected reply: %s", text)
-        return "NOTHING"
-    return token
+
+    text = text.strip()
+    # Expect formats: "BUY 2", "SELL 1.5", or "NOTHING"
+    parts = text.split()
+    if not parts:
+        logger.warning("GPT returned empty reply")
+        return "NOTHING", None
+
+    action = parts[0].upper()
+    amount = None
+    if action not in ("BUY", "SELL", "NOTHING"):
+        logger.warning("GPT returned unexpected action: %s", text)
+        return "NOTHING", None
+
+    if action in ("BUY", "SELL"):
+        if len(parts) >= 2:
+            # try to parse the amount as number of shares
+            try:
+                amount = Decimal(parts[1])
+            except Exception:
+                # attempt to strip non-numeric characters
+                cleaned = ''.join(c for c in parts[1] if (c.isdigit() or c in '.-'))
+                try:
+                    amount = Decimal(cleaned) if cleaned else None
+                except Exception:
+                    amount = None
+        else:
+            # no amount provided
+            amount = None
+
+    return action, amount
 
 
 def connect_alpaca():
@@ -438,6 +469,68 @@ def get_wallet_amount(api, field: str = "cash") -> Decimal:
     except Exception as e:
         logger.exception("Failed to convert account field '%s' value to Decimal: %s", field, e)
         raise RuntimeError(f"Invalid numeric value for account field '{field}'") from e
+
+
+def get_owned_positions(api) -> dict:
+    """
+    Return a dict mapping symbol -> Decimal(quantity) for all owned positions in the Alpaca account.
+
+    This function tries multiple common Alpaca client methods (list_positions, get_positions) and
+    handles both object and mapping-style position items. Symbols are normalized to uppercase.
+    """
+    if api is None:
+        raise RuntimeError("Alpaca API client is not provided")
+
+    try:
+        if hasattr(api, "list_positions"):
+            positions = api.list_positions()
+        elif hasattr(api, "get_positions"):
+            positions = api.get_positions()
+        elif hasattr(api, "get_all_positions"):
+            positions = api.get_all_positions()
+        else:
+            raise RuntimeError("Alpaca client does not support listing positions")
+    except Exception as e:
+        logger.exception("Failed to list positions from Alpaca: %s", e)
+        raise RuntimeError("Failed to list positions from Alpaca") from e
+
+    owned = {}
+    for p in positions:
+        sym = None
+        qty_val = None
+
+        # handle mapping-like position
+        if isinstance(p, dict):
+            sym = p.get("symbol") or p.get("ticker")
+            qty_val = p.get("qty") or p.get("quantity") or p.get("shares")
+        else:
+            # object-like position
+            for a in ("symbol", "ticker"):
+                if hasattr(p, a):
+                    sym = getattr(p, a)
+                    break
+            for a in ("qty", "quantity", "shares"):
+                if hasattr(p, a):
+                    qty_val = getattr(p, a)
+                    break
+
+        if not sym:
+            # Skip entries we can't identify
+            continue
+
+        # Normalize and convert quantity to Decimal
+        try:
+            qty = Decimal(str(qty_val))
+        except Exception:
+            # last-resort attempt to pull common attr names
+            try:
+                qty = Decimal(str(getattr(p, "qty", 0)))
+            except Exception:
+                qty = Decimal(0)
+
+        owned[str(sym).upper()] = qty
+
+    return owned
 
 
 def can_buy(api, price: Decimal, qty: int) -> bool:
@@ -542,6 +635,34 @@ def run_once(api, symbol: str):
         logger.exception("GPT error for %s: %s", symbol, e)
         return
 
+    # Gather additional context required by the new GPT prompt
+    try:
+        price = get_last_trade_price(api, symbol)
+    except Exception:
+        price = None
+
+    try:
+        owned_positions = get_owned_positions(api)
+        shares_owned = owned_positions.get(symbol.upper(), Decimal(0))
+    except Exception:
+        shares_owned = Decimal(0)
+
+    try:
+        wallet_amount = get_wallet_amount(api, "cash")
+    except Exception:
+        # fallback to buying_power if cash not available
+        try:
+            wallet_amount = get_wallet_amount(api, "buying_power")
+        except Exception:
+            wallet_amount = Decimal(0)
+
+    # Ask GPT for decision with full context
+    try:
+        decision, amount = ask_gpt_for_decision(rsi, symbol, shares_owned, price if price is not None else Decimal(0), wallet_amount)
+    except Exception as e:
+        logger.exception("GPT error when called with extended context for %s: %s", symbol, e)
+        return
+
     if decision == "BUY":
         try:
             # Log wallet amounts before attempting to buy
@@ -555,16 +676,37 @@ def run_once(api, symbol: str):
                 bp_before = None
             logger.info("Wallet before BUY for %s: cash=%s buying_power=%s", symbol, str(cash_before) if cash_before is not None else "<unknown>", str(bp_before) if bp_before is not None else "<unknown>")
 
-            price = get_last_trade_price(api, symbol)
-            if not can_buy(api, price, QTY):
-                logger.info("Insufficient buying power to buy %d %s at %s", QTY, symbol, price)
-                return
-            place_order(api, symbol, QTY, "buy")
+            # Determine qty to buy: prefer GPT-provided amount, else use configured QTY
+            qty_to_buy = QTY if amount is None else amount
+
+            # Ensure qty_to_buy is numeric
+            try:
+                # if amount is Decimal already, this is harmless
+                qty_numeric = Decimal(qty_to_buy)
+            except Exception:
+                try:
+                    qty_numeric = Decimal(str(QTY))
+                except Exception:
+                    qty_numeric = Decimal(0)
+
+            # Check buying power using the last trade price if available
+            if price is not None and qty_numeric > 0:
+                if not can_buy(api, price, int(qty_numeric) if qty_numeric == qty_numeric.to_integral_value() else float(qty_numeric)):
+                    logger.info("Insufficient buying power to buy %s %s at %s", qty_numeric, symbol, price)
+                    return
+
+            # Convert qty_numeric to int when whole number else float (for fractional)
+            if qty_numeric == qty_numeric.to_integral_value():
+                qty_for_order = int(qty_numeric)
+            else:
+                qty_for_order = float(qty_numeric)
+
+            place_order(api, symbol, qty_for_order, "buy")
         except Exception as e:
             logger.exception("Error handling BUY for %s: %s", symbol, e)
     elif decision == "SELL":
         try:
-            # Sell entire position for this symbol
+            # Determine qty to sell: prefer GPT-provided amount, else sell entire position
             try:
                 pos = api.get_position(symbol)
             except Exception:
@@ -574,7 +716,6 @@ def run_once(api, symbol: str):
             try:
                 qty_owned = Decimal(str(pos.qty))
             except Exception:
-                # fallback if pos.qty isn't present
                 try:
                     qty_owned = Decimal(str(getattr(pos, "qty", 0)))
                 except Exception:
@@ -585,11 +726,23 @@ def run_once(api, symbol: str):
                 logger.info("Do not own any %s to sell", symbol)
                 return
 
-            # Prepare qty for order: use integer shares when whole number, otherwise use float for fractional
-            if qty_owned == qty_owned.to_integral_value():
-                qty_for_order = int(qty_owned)
+            if amount is None:
+                qty_to_sell = qty_owned
             else:
-                qty_for_order = float(qty_owned)
+                try:
+                    qty_to_sell = Decimal(amount)
+                except Exception:
+                    qty_to_sell = qty_owned
+
+            # Cap qty_to_sell at qty_owned
+            if qty_to_sell > qty_owned:
+                qty_to_sell = qty_owned
+
+            # Prepare qty for order: integer when whole number, else float for fractional
+            if qty_to_sell == qty_to_sell.to_integral_value():
+                qty_for_order = int(qty_to_sell)
+            else:
+                qty_for_order = float(qty_to_sell)
 
             place_order(api, symbol, qty_for_order, "sell")
             # Log wallet amounts after SELL

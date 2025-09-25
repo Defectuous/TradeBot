@@ -4,7 +4,7 @@ Overview
 
 This small scaffold implements a minute-by-minute loop that:
 - Fetches RSI from TAAPI.io for a configured symbol (1m interval)
-- Sends the RSI value to OpenAI (`gpt-3.5-turbo-instruct`) asking for a single decision: BUY/SELL/NOTHING
+- Sends the RSI value to OpenAI (`gpt-3.5-turbo`) asking for a single decision: BUY/SELL/NOTHING
 - Uses the Alpaca Python SDK to place market orders (paper account recommended)
 
 Files
@@ -34,7 +34,7 @@ $env:DRY_RUN = "true"; python .\trade_bot.py
 Notes
 
 - The script uses US/Eastern hours (market open 9:30 to 16:00 ET).
-- Default model is `gpt-3.5-turbo-instruct` but can be overridden with `OPENAI_MODEL`.
+- Default model is `gpt-3.5-turbo` but can be overridden with `OPENAI_MODEL`.
 - Use `ALPACA_BASE_URL` to switch to paper/live endpoints. Default is paper.
 - Always test in `DRY_RUN=true` and with Alpaca paper account before enabling live trading.
 
@@ -119,12 +119,13 @@ RestartSec=10s
 WantedBy=multi-user.target
 ```
 
-Then enable and start:
+Then enable and start/stop:
 
 ```bash
 sudo systemctl daemon-reload
 sudo systemctl enable trade_bot.service
 sudo systemctl start trade_bot.service
+sudo systemctl stop trade_bot.service
 sudo journalctl -u trade_bot.service -f
 ```
 
